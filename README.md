@@ -122,6 +122,58 @@ kubectl apply -f spark-app-banning-policy.yaml
 
 ---
 
+#### `apply-ban-policy.sh` (cluster-scoped)
+**Назначение:** Скрипт для применения политики бана во всем кластере.
+
+**Что делает:**
+1. Применяет `spark-app-banning-policy.yaml` (ClusterPolicy)
+2. Ждет запуска Job для немедленного удаления подов
+3. Показывает логи Job
+4. Проверяет результат
+
+**Использование:**
+```bash
+./apply-ban-policy.sh
+```
+
+**Особенности:**
+- Использует `ClusterPolicy` (действует во всех namespaces)
+- Применяется БЕЗ флага `-n`
+- Ресурсы создаются в разных namespaces
+
+---
+
+#### `apply-ban-policy-namespaced.sh` (namespaced)
+**Назначение:** Скрипт для применения политики бана в конкретном namespace.
+
+**Что делает:**
+1. Применяет `spark-app-banning-policy-namespaced.yaml` (Policy)
+2. Ждет запуска Job
+3. Показывает логи и результат
+
+**Использование:**
+```bash
+# Применить в namespace 'spark' (по умолчанию)
+./apply-ban-policy-namespaced.sh
+
+# Применить в другом namespace
+./apply-ban-policy-namespaced.sh production
+./apply-ban-policy-namespaced.sh dev
+```
+
+**Особенности:**
+- Использует `Policy` (действует только в одном namespace)
+- Namespace задается как параметр скрипта
+- Все ресурсы создаются в одном namespace
+- Более гибкий и безопасный
+
+**Когда использовать:**
+- ✅ Executor'ы в одном namespace
+- ✅ Нужна изоляция между окружениями
+- ✅ Хотите задавать namespace в скрипте
+
+---
+
 #### `pyproject.toml`
 **Назначение:** Конфигурация Python проекта и зависимостей.
 

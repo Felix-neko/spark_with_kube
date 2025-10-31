@@ -55,6 +55,29 @@ DRIVER_PORT = "7077"
 BLOCKMANAGER_PORT = "7078"
 
 # ============================================================================
+# ТАЙМАУТ ДЛЯ ВСЕГО ПРИЛОЖЕНИЯ
+# ============================================================================
+
+# Обработчик таймаута - должен быть определен ДО создания SparkSession
+def timeout_handler(signum, frame):
+    print(f"\n{'='*60}")
+    print("⏱️  TIMEOUT: Приложение не смогло запуститься за 120 секунд")
+    print("   Вероятно, executor'ы не могут быть созданы в Kubernetes.")
+    print("   Проверьте:")
+    print("   1. Нет ли Kyverno политик, блокирующих создание подов")
+    print("   2. Достаточно ли ресурсов в кластере")
+    print("   3. Правильно ли настроены RBAC права")
+    print(f"{'='*60}\n")
+    sys.exit(1)
+
+# Устанавливаем глобальный таймаут для всего приложения
+APP_TIMEOUT = 120  # 2 минуты
+signal.signal(signal.SIGALRM, timeout_handler)
+signal.alarm(APP_TIMEOUT)
+
+print(f"⏱️  Установлен таймаут: {APP_TIMEOUT} секунд для запуска приложения\n")
+
+# ============================================================================
 # СОЗДАНИЕ SPARK SESSION
 # ============================================================================
 
@@ -140,12 +163,23 @@ spark = (
     .config("spark.kubernetes.allocation.batch.size", "2")  # Создавать по 2 пода за раз
     .config("spark.kubernetes.allocation.batch.delay", "5s")  # Задержка между батчами
     
-    # Таймаут ожидания запуска executor'а (2 минуты)
+    # КРИТИЧНО: Таймаут ожидания запуска executor'а
     # Если за это время executor не запустится, Spark прекратит попытки
-    .config("spark.kubernetes.executor.request.timeout", "120s")
+    .config("spark.kubernetes.executor.request.timeout", "30s")
     
-    # Интервал между попытками создания pod'ов (по умолчанию 1s)
-    .config("spark.kubernetes.allocation.executor.timeout", "120s")
+    # Интервал между попытками создания pod'ов
+    .config("spark.kubernetes.allocation.executor.timeout", "30s")
+    
+    # Максимальное время ожидания создания pod'а (Spark 3.4+)
+    .config("spark.kubernetes.executor.podNamePrefix", "pyspark-k8s-client")
+    
+    # Отключаем динамическое выделение, чтобы Spark не пытался бесконечно
+    .config("spark.dynamicAllocation.enabled", "false")
+    
+    # Scheduler mode - fail fast при недоступности executor'ов
+    .config("spark.scheduler.mode", "FAIR")
+    .config("spark.scheduler.maxRegisteredResourcesWaitingTime", "30s")
+    .config("spark.scheduler.minRegisteredResourcesRatio", "0.8")
     
     # ========================================================================
     # ЛОГИРОВАНИЕ
@@ -169,34 +203,12 @@ print(f"App name: {spark.sparkContext.appName}")
 print("=" * 60)
 
 # ============================================================================
-# ТЕСТОВЫЙ JOB С ТАЙМАУТОМ
+# ТЕСТОВЫЙ JOB
 # ============================================================================
-
-# Обработчик таймаута
-def timeout_handler(signum, frame):
-    print(f"\n{'='*60}")
-    print("⏱️  TIMEOUT: Job не завершился за отведенное время (120 секунд)")
-    print("   Вероятно, executor'ы не могут быть созданы в Kubernetes.")
-    print(f"{'='*60}\n")
-    
-    # Останавливаем Spark
-    try:
-        spark.stop()
-    except:
-        pass
-    
-    sys.exit(1)
 
 # Простой тест: создаем DataFrame с числами от 0 до 999 и считаем их
 print("\nStarting test job...")
-
-# Устанавливаем таймаут для выполнения job'а
-JOB_TIMEOUT = 120  # 2 минуты
 start_time = time.time()
-
-# Устанавливаем signal alarm для жесткого таймаута
-signal.signal(signal.SIGALRM, timeout_handler)
-signal.alarm(JOB_TIMEOUT)
 
 try:
     # spark.range() создает DataFrame с одной колонкой "id"
@@ -209,13 +221,9 @@ try:
     
     elapsed = time.time() - start_time
     print(f"Test job completed successfully in {elapsed:.2f} seconds!\n")
-    
-    # Отключаем alarm, так как job завершился успешно
-    signal.alarm(0)
+    print("^__^")
     
 except Exception as e:
-    # Отключаем alarm
-    signal.alarm(0)
     elapsed = time.time() - start_time
     print(f"\n{'='*60}")
     print(f"ERROR: Job failed after {elapsed:.2f} seconds")
@@ -238,6 +246,9 @@ except Exception as e:
 # ============================================================================
 # ЗАВЕРШЕНИЕ
 # ============================================================================
+
+# Отключаем таймаут, так как приложение успешно завершилось
+signal.alarm(0)
 
 # Останавливаем Spark сессию и освобождаем ресурсы
 # Это удалит все executor поды из Kubernetes

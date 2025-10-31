@@ -21,8 +21,9 @@ spec:
   # validationFailureAction: audit - политика будет только логировать нарушения
   validationFailureAction: enforce
   
-  # background: false - не применять политику к существующим ресурсам
-  background: false
+  # background: true - применять политику к существующим ресурсам
+  # Это позволит удалять уже запущенные поды при создании политики
+  background: true
   
   # Правила валидации
   rules:
@@ -39,6 +40,22 @@ spec:
             namespaces:
               - spark
       
+      # Исключаем cleanup Job'ы
+      exclude:
+        any:
+        - resources:
+            kinds:
+              - Pod
+            selector:
+              matchLabels:
+                job-name: delete-spark-policy-after-15min
+        - resources:
+            kinds:
+              - Pod
+            selector:
+              matchLabels:
+                job-name: cleanup-banned-pods-immediate
+      
       # Валидация: проверяем метки и отклоняем, если это наше приложение
       validate:
         message: >
@@ -53,6 +70,130 @@ spec:
               # Запрещаем метку spark-app-name=pyspark-k8s-client
               # Используем !(pyspark-k8s-client) - "не равно pyspark-k8s-client"
               spark-app-name: "!pyspark-k8s-client"
+---
+# Kyverno CleanupPolicy для удаления существующих подов
+# Эта политика активно удаляет поды, которые нарушают правила
+apiVersion: kyverno.io/v2beta1
+kind: ClusterCleanupPolicy
+metadata:
+  name: cleanup-banned-spark-app
+    policies.kyverno.io/title: "Cleanup Banned Spark App Pods"
+    policies.kyverno.io/description: >
+      Удаляет существующие поды с меткой spark-app-name=pyspark-k8s-client
+      в namespace spark. Работает совместно с deny-spark-app-pyspark-k8s-client.
+spec:
+  # Расписание проверки (каждые 5 минут - минимальный интервал для стандартного cron)
+  schedule: "*/5 * * * *"
+  
+  # Условия для поиска подов, которые нужно удалить
+  match:
+    any:
+    - resources:
+        kinds:
+          - Pod
+        namespaces:
+          - spark
+        selector:
+          matchLabels:
+            spark-app-name: pyspark-k8s-client
+  
+  # Условия для удаления (все найденные поды будут удалены)
+  conditions:
+    all:
+    - key: "{{ request.object.metadata.labels.\"spark-app-name\" || '' }}"
+      operator: Equals
+      value: "pyspark-k8s-client"
+---
+# Job для немедленного удаления существующих подов при применении политики
+# Запускается сразу и не ждет расписания CleanupPolicy
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cleanup-banned-pods-immediate
+  namespace: spark
+  annotations:
+    description: "Немедленно удаляет поды с spark-app-name=pyspark-k8s-client"
+spec:
+  # Удалить Job через 5 минут после завершения
+  ttlSecondsAfterFinished: 300
+  # Не перезапускать при неудаче
+  backoffLimit: 0
+  template:
+    metadata:
+      name: cleanup-pods
+    spec:
+      serviceAccountName: spark-pod-cleaner
+      restartPolicy: Never
+      containers:
+      - name: kubectl
+        image: bitnami/kubectl:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          
+          echo "[$(date)] Starting immediate cleanup of banned pods..."
+          echo "Target: pods with label spark-app-name=pyspark-k8s-client in namespace spark"
+          echo ""
+          
+          # Небольшая задержка для инициализации
+          sleep 2
+          
+          # Получаем список подов
+          echo "Searching for pods..."
+          PODS=$(kubectl get pods -n spark -l spark-app-name=pyspark-k8s-client -o name 2>/dev/null || true)
+          
+          if [ -z "$PODS" ]; then
+            echo "✓ No pods found with the banned label."
+            echo "Nothing to clean up."
+          else
+            echo "✗ Found pods to delete:"
+            echo "$PODS" | sed 's/^/  - /'
+            echo ""
+            
+            # Удаляем найденные поды принудительно
+            echo "Deleting pods..."
+            kubectl delete -n spark -l spark-app-name=pyspark-k8s-client pods --grace-period=0 --force 2>&1 | sed 's/^/  /'
+            
+            echo ""
+            echo "✓ Cleanup completed successfully."
+          fi
+          
+          echo "[$(date)] Job finished."
+---
+# ServiceAccount для Job, который удаляет поды
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spark-pod-cleaner
+  namespace: spark
+---
+# Role с правами на удаление подов
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spark-pod-cleaner-role
+  namespace: spark
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "delete"]
+---
+# RoleBinding для ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spark-pod-cleaner-binding
+  namespace: spark
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: spark-pod-cleaner-role
+subjects:
+- kind: ServiceAccount
+  name: spark-pod-cleaner
+  namespace: spark
 ---
 # CronJob для автоматического удаления политики через 15 минут
 # Альтернативный подход: использовать Job с sleep 900
@@ -81,14 +222,18 @@ spec:
         - -c
         - |
           # Ждем 15 минут (900 секунд)
-          echo "Waiting 15 minutes before deleting the policy..."
+          echo "Waiting 15 minutes before deleting the policies..."
           sleep 900
           
           # Удаляем ClusterPolicy
           echo "Deleting ClusterPolicy: deny-spark-app-pyspark-k8s-client"
-          kubectl delete clusterpolicy deny-spark-app-pyspark-k8s-client
+          kubectl delete clusterpolicy deny-spark-app-pyspark-k8s-client --ignore-not-found=true
           
-          echo "Policy deleted successfully"
+          # Удаляем ClusterCleanupPolicy
+          echo "Deleting ClusterCleanupPolicy: cleanup-banned-spark-app"
+          kubectl delete clustercleanuppolicy cleanup-banned-spark-app --ignore-not-found=true
+          
+          echo "All policies deleted successfully"
 ---
 # ServiceAccount для Job, который удаляет политику
 apiVersion: v1
@@ -97,14 +242,14 @@ metadata:
   name: kyverno-cleanup-sa
   namespace: kyverno
 ---
-# ClusterRole с правами на удаление ClusterPolicy
+# ClusterRole с правами на удаление ClusterPolicy и ClusterCleanupPolicy
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: kyverno-policy-deleter
 rules:
 - apiGroups: ["kyverno.io"]
-  resources: ["clusterpolicies"]
+  resources: ["clusterpolicies", "clustercleanuppolicies"]
   verbs: ["delete", "get"]
 ---
 # ClusterRoleBinding для ServiceAccount
