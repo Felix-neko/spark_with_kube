@@ -1,0 +1,72 @@
+# driver-proxy.yaml
+# 
+# Этот файл создает Service и Endpoints для проксирования трафика из Kubernetes кластера
+# на локальную машину, где запущен Spark driver в client mode.
+#
+# Проблема: В client mode Spark driver работает вне кластера (на вашей машине),
+# а executor'ы запускаются внутри Kubernetes. Executor'ы должны иметь возможность
+# подключиться к driver'у для получения задач и отправки результатов.
+#
+# Решение: Создаем Service без selector'а и вручную указываем Endpoints,
+# которые указывают на IP вашей локальной машины. Таким образом, когда executor
+# в кластере обращается к driver-proxy.spark.svc.cluster.local, трафик
+# перенаправляется на вашу локальную машину.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: driver-proxy
+  namespace: spark
+spec:
+  # Порты, которые будут доступны внутри кластера
+  ports:
+    # Порт 7077 - основной порт для коммуникации driver-executor
+    # Используется для RPC-коммуникации между driver и executor'ами
+    - name: driver
+      port: 7077
+      targetPort: 7077
+      protocol: TCP
+    
+    # Порт 7078 - BlockManager порт
+    # Используется для передачи блоков данных между driver и executor'ами
+    - name: blockmanager
+      port: 7078
+      targetPort: 7078
+      protocol: TCP
+    
+    # Порт 4040 - Spark UI
+    # Web-интерфейс для мониторинга Spark приложения
+    - name: ui
+      port: 4040
+      targetPort: 4040
+      protocol: TCP
+  
+  # Важно: НЕТ selector! Это означает, что Service не будет автоматически
+  # находить поды. Вместо этого мы вручную создаем Endpoints ниже.
+
+---
+# Endpoints - вручную определенные точки подключения для Service
+# Указываем IP вашей локальной машины, чтобы трафик шел туда
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: driver-proxy  # Имя должно совпадать с именем Service
+  namespace: spark
+subsets:
+  - addresses:
+      # IP адрес вашей локальной машины в сети
+      # ВАЖНО: Этот IP должен быть доступен из Kubernetes кластера!
+      # Для minikube это обычно IP хост-машины в той же сети
+      # Проверить можно командой: ip addr show | grep "inet "
+      - ip: 192.168.1.66   # <- ваш хост IP (проверьте актуальность!)
+    ports:
+      # Порты должны совпадать с портами в Service
+      - name: driver
+        port: 7077
+        protocol: TCP
+      - name: blockmanager
+        port: 7078
+        protocol: TCP
+      - name: ui
+        port: 4040
+        protocol: TCP

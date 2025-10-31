@@ -1,0 +1,122 @@
+# Kyverno ClusterPolicy для запрета создания Spark-приложения с определенным именем
+# Эта политика блокирует создание подов с меткой spark-app-name=pyspark-k8s-client
+# в namespace spark для ServiceAccount spark-client
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: deny-spark-app-pyspark-k8s-client
+  annotations:
+    # Политика автоматически удалится через 15 минут (900 секунд)
+    # Kyverno не поддерживает TTL напрямую, поэтому используем kubectl с timeout
+    policies.kyverno.io/title: "Deny Spark App pyspark-k8s-client"
+    policies.kyverno.io/category: "Spark Security"
+    policies.kyverno.io/severity: "high"
+    policies.kyverno.io/subject: "Pod"
+    policies.kyverno.io/description: >
+      Эта политика запрещает ServiceAccount spark-client создавать поды
+      с меткой spark-app-name=pyspark-k8s-client в namespace spark.
+      Используется для временного блокирования конкретного Spark-приложения.
+spec:
+  # validationFailureAction: enforce - политика будет блокировать создание подов
+  # validationFailureAction: audit - политика будет только логировать нарушения
+  validationFailureAction: enforce
+  
+  # background: false - не применять политику к существующим ресурсам
+  background: false
+  
+  # Правила валидации
+  rules:
+    # Правило 1: Запретить создание подов с определенной меткой
+    - name: deny-pyspark-k8s-client-pods
+      
+      # К каким ресурсам применяется правило
+      match:
+        any:
+        - resources:
+            kinds:
+              - Pod
+            # Только в namespace spark
+            namespaces:
+              - spark
+      
+      # Валидация: проверяем метки и отклоняем, если это наше приложение
+      validate:
+        message: >
+          Создание подов с меткой 'spark-app-name=pyspark-k8s-client' 
+          временно запрещено в namespace 'spark'.
+          Эта политика действует в течение 15 минут.
+        # Используем pattern для проверки - если метка НЕ равна pyspark-k8s-client, то OK
+        # Если равна - валидация провалится
+        pattern:
+          metadata:
+            labels:
+              # Запрещаем метку spark-app-name=pyspark-k8s-client
+              # Используем !(pyspark-k8s-client) - "не равно pyspark-k8s-client"
+              spark-app-name: "!pyspark-k8s-client"
+---
+# CronJob для автоматического удаления политики через 15 минут
+# Альтернативный подход: использовать Job с sleep 900
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: delete-spark-policy-after-15min
+  namespace: kyverno
+  annotations:
+    description: "Удаляет ClusterPolicy через 15 минут"
+spec:
+  # Job будет удален через 1 час после завершения
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      name: delete-policy
+    spec:
+      # ServiceAccount с правами на удаление ClusterPolicy
+      serviceAccountName: kyverno-cleanup-sa
+      restartPolicy: Never
+      containers:
+      - name: kubectl
+        image: bitnami/kubectl:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          # Ждем 15 минут (900 секунд)
+          echo "Waiting 15 minutes before deleting the policy..."
+          sleep 900
+          
+          # Удаляем ClusterPolicy
+          echo "Deleting ClusterPolicy: deny-spark-app-pyspark-k8s-client"
+          kubectl delete clusterpolicy deny-spark-app-pyspark-k8s-client
+          
+          echo "Policy deleted successfully"
+---
+# ServiceAccount для Job, который удаляет политику
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kyverno-cleanup-sa
+  namespace: kyverno
+---
+# ClusterRole с правами на удаление ClusterPolicy
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kyverno-policy-deleter
+rules:
+- apiGroups: ["kyverno.io"]
+  resources: ["clusterpolicies"]
+  verbs: ["delete", "get"]
+---
+# ClusterRoleBinding для ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kyverno-cleanup-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kyverno-policy-deleter
+subjects:
+- kind: ServiceAccount
+  name: kyverno-cleanup-sa
+  namespace: kyverno

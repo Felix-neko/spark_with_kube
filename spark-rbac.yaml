@@ -1,0 +1,89 @@
+# spark-rbac.yaml
+#
+# Этот файл настраивает RBAC (Role-Based Access Control) для Spark приложений
+# в Kubernetes. RBAC определяет, какие операции может выполнять Spark driver
+# в кластере Kubernetes.
+#
+# Структура:
+# 1. Namespace - изолированное пространство для Spark ресурсов
+# 2. ServiceAccount - "пользователь" от имени которого работает Spark driver
+# 3. Role - набор разрешений (что можно делать)
+# 4. RoleBinding - связывает ServiceAccount с Role (кто может что делать)
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spark
+  # Namespace "spark" - отдельное пространство имен для всех Spark ресурсов
+  # Изолирует Spark приложения от других приложений в кластере
+
+---
+# ServiceAccount - идентификатор для Spark driver'а в Kubernetes
+# Когда Spark driver создает executor'ы, он использует этот ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spark-client
+  namespace: spark
+  # ServiceAccount "spark-client" используется в конфигурации Spark:
+  # spark.kubernetes.authenticate.driver.serviceAccountName=spark-client
+
+---
+# Role - определяет набор разрешений в рамках namespace "spark"
+# Это НЕ ClusterRole, поэтому права действуют только в namespace spark
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spark-role
+  namespace: spark
+rules:
+  # Правило 1: Работа с основными ресурсами Kubernetes
+  - apiGroups: [""]  # "" означает core API group
+    resources: 
+      # pods - Spark создает поды для executor'ов
+      # services - может создавать сервисы для коммуникации
+      # configmaps - используется для конфигурации executor'ов
+      # secrets - может использоваться для хранения credentials
+      - pods
+      - services
+      - configmaps
+      - secrets
+    verbs: 
+      # Полный набор операций CRUD + watch
+      - create   # Создание новых ресурсов (executor pods)
+      - get      # Получение информации о ресурсе
+      - list     # Получение списка ресурсов
+      - watch    # Отслеживание изменений в реальном времени
+      - update   # Обновление существующих ресурсов
+      - patch    # Частичное обновление ресурсов
+      - delete   # Удаление ресурсов (cleanup после завершения)
+  
+  # Правило 2: Чтение информации о Jobs и Deployments
+  - apiGroups: ["batch", "apps"]
+    resources: 
+      - jobs         # Batch jobs
+      - deployments  # Deployments
+    verbs: 
+      # Только чтение - Spark может мониторить, но не изменять
+      - get
+      - list
+      - watch
+
+---
+# RoleBinding - связывает ServiceAccount "spark-client" с Role "spark-role"
+# Это означает: "spark-client может делать все, что разрешено в spark-role"
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spark-rolebinding
+  namespace: spark
+subjects:
+  # Кто получает права (subject)
+  - kind: ServiceAccount
+    name: spark-client
+    namespace: spark
+roleRef:
+  # Какие права получает (roleRef)
+  kind: Role
+  name: spark-role
+  apiGroup: rbac.authorization.k8s.io
