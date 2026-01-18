@@ -111,33 +111,82 @@ class SparkSubmitThread(threading.Thread):
     def _run_spark_submit(self):
         cmd = [
             "spark-submit",
+            
+            # URL Kubernetes API сервера (k8s://https://...)
             "--master", K8S_MASTER,
+            
+            # Режим развёртывания: cluster (драйвер внутри Kubernetes) или client (драйвер локально)
             "--deploy-mode", "cluster",
-            "--name", self.app_name,
+            
+            # Имя приложения в Spark UI (закомментировано, т.к. не обязательно)
+            # "--name", self.app_name,
+            
+            # Namespace в Kubernetes, где будут созданы поды драйвера и исполнителей
             "--conf", f"spark.kubernetes.namespace={NAMESPACE}",
+            
+            # Docker-образ для контейнеров драйвера и исполнителей
             "--conf", f"spark.kubernetes.container.image={EXECUTOR_IMAGE}",
+            
+            # Имя пода драйвера (для удобства отладки и получения логов)
             "--conf", f"spark.kubernetes.driver.pod.name=spark-driver-cluster-demo",
+            
+            # ServiceAccount для драйвера (нужен для создания подов исполнителей)
             "--conf", f"spark.kubernetes.authenticate.driver.serviceAccountName=spark-client",
-            "--conf", f"spark.kubernetes.authenticate.submission.caCertFile={CA_CERT}",
-            "--conf", f"spark.kubernetes.authenticate.submission.clientKeyFile={CLIENT_KEY}",
-            "--conf", f"spark.kubernetes.authenticate.submission.clientCertFile={CLIENT_CERT}",
-            "--conf", f"spark.kubernetes.driverEnv.LOG_HOST={self.log_host}",
-            "--conf", f"spark.kubernetes.driverEnv.LOG_PORT={self.log_port}",
-            "--conf", "spark.kubernetes.driverEnv.PYSPARK_PYTHON=python3.8",
-            "--conf", "spark.kubernetes.driverEnv.PYSPARK_DRIVER_PYTHON=python3.8",
-            "--conf", "spark.executorEnv.PYSPARK_PYTHON=python3.8",
-            "--conf", "spark.pyspark.python=python3.8",
-            "--conf", "spark.pyspark.driver.python=python3.8",
-            "--conf", "spark.executor.instances=2",
-            "--conf", "spark.executor.memory=1g",
-            "--conf", "spark.executor.cores=1",
-            "--conf", "spark.driver.memory=1g",
-            "--conf", "spark.driver.cores=1",
-            "--conf", "spark.network.timeout=600s",
-            "--conf", "spark.executor.heartbeatInterval=60s",
+            
+            # Сертификаты для аутентификации в Kubernetes API при отправке приложения
+            "--conf", f"spark.kubernetes.authenticate.submission.caCertFile={CA_CERT}",  # CA-сертификат кластера
+            "--conf", f"spark.kubernetes.authenticate.submission.clientKeyFile={CLIENT_KEY}",  # Приватный ключ клиента
+            "--conf", f"spark.kubernetes.authenticate.submission.clientCertFile={CLIENT_CERT}",  # Сертификат клиента
+            
+            # Переменные окружения для драйвера (передаются в контейнер драйвера)
+            "--conf", f"spark.kubernetes.driverEnv.LOG_HOST={self.log_host}",  # IP хоста для socket-логирования
+            "--conf", f"spark.kubernetes.driverEnv.LOG_PORT={self.log_port}",  # Порт для socket-логирования
+            "--conf", "spark.kubernetes.driverEnv.PYSPARK_PYTHON=python3.8",  # Python для драйвера
+            "--conf", "spark.kubernetes.driverEnv.PYSPARK_DRIVER_PYTHON=python3.8",  # Python для драйвера (дубликат)
+            
+            # Переменные окружения для исполнителей
+            "--conf", "spark.executorEnv.PYSPARK_PYTHON=python3.8",  # Python для исполнителей
+            
+            # Глобальные настройки Python для Spark
+            "--conf", "spark.pyspark.python=python3.8",  # Python для исполнителей (альтернативный способ)
+            "--conf", "spark.pyspark.driver.python=python3.8",  # Python для драйвера (альтернативный способ)
+            
+            # Ресурсы для исполнителей
+            "--conf", "spark.executor.instances=2",  # Количество исполнителей
+            "--conf", "spark.executor.memory=1g",  # Память на исполнитель
+            "--conf", "spark.executor.cores=1",  # CPU-ядра на исполнитель
+            
+            # Ресурсы для драйвера
+            "--conf", "spark.driver.memory=1g",  # Память для драйвера
+            "--conf", "spark.driver.cores=1",  # CPU-ядра для драйвера
+            
+            # Таймауты и heartbeat
+            "--conf", "spark.network.timeout=600s",  # Таймаут сетевых операций
+            "--conf", "spark.executor.heartbeatInterval=60s",  # Интервал heartbeat от исполнителей
+            
+            # Ожидание завершения приложения (spark-submit не завершится до окончания работы)
             "--conf", "spark.kubernetes.submission.waitAppCompletion=true",
-            "--conf", "spark.kubernetes.driver.limit.cores=1",
-            "--conf", "spark.kubernetes.executor.limit.cores=1",
+            
+            # Лимиты ресурсов в Kubernetes (requests/limits)
+            "--conf", "spark.kubernetes.driver.limit.cores=1",  # Лимит CPU для драйвера
+            "--conf", "spark.kubernetes.executor.limit.cores=1",  # Лимит CPU для исполнителей
+            
+            # ЕДИНСТВЕННЫЙ РАБОЧИЙ ВАРИАНТ для Kubernetes: HTTP/HTTPS URL
+            # 
+            # ПОЧЕМУ ЛОКАЛЬНЫЙ ПУТЬ НЕ РАБОТАЕТ:
+            # В YARN файлы автоматически загружаются через HDFS/локальную ФС кластера.
+            # В Kubernetes контейнер драйвера изолирован и не имеет доступа к файлам хост-машины.
+            # 
+            # ДОСТУПНЫЕ ВАРИАНТЫ:
+            # 1. ✅ HTTP/HTTPS URL - используется здесь
+            # 2. ❌ Локальный путь - файл недоступен в контейнере
+            # 3. ❌ ConfigMap - не поддерживается в Spark 3.5.8
+            # 4. ✅ Встроить в Docker-образ - запрещено пользователем
+            # 
+            # HTTP-сервер запускается на строке 272-278 в функции main():
+            #   http_server = subprocess.Popen([sys.executable, "-m", "http.server", str(http_port), ...])
+            # Он раздаёт файлы из директории BASEDIR на порту 8765.
+            # Kubernetes-под драйвера скачивает app.py по URL http://{host_ip}:8765/app.py
             self.app_url,
         ]
         
