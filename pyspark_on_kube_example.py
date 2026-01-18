@@ -34,7 +34,8 @@ K8S_MASTER = "k8s://https://192.168.85.2:8443"
 # Docker образ для executor'ов
 # Должен содержать Spark той же версии, что и локальный PySpark
 # Официальные образы: https://hub.docker.com/r/apache/spark
-EXECUTOR_IMAGE = "apache/spark:3.3.3-python3"  # Важно: здесь используется Python 3.8, у нас тоже должен быть Python 3.8
+# EXECUTOR_IMAGE = "apache/spark:3.3.3-python3"  # Важно: здесь используется Python 3.8, у нас тоже должен быть Python 3.8
+EXECUTOR_IMAGE = "felixneko/spark:spark-3.5.8-python-3.8"
 
 # Namespace в Kubernetes, где будут создаваться executor поды
 NAMESPACE = "spark"
