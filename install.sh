@@ -1,8 +1,8 @@
 BASEDIR=$(dirname "$0")
 
 kubectl create namespace spark
-kubectl apply -f $BASEDIR/driver-proxy.yaml
-kubectl apply -f $BASEDIR/spark-rbac.yaml
+kubectl apply -f $BASEDIR/driver-proxy.yaml -n spark
+kubectl apply -f $BASEDIR/spark-rbac.yaml -n spark
 
 helm repo add kyverno https://kyverno.github.io/kyverno/
 helm repo update
