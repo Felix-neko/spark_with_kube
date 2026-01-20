@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 from dataclasses import dataclass
@@ -83,6 +84,17 @@ def log_error(msg: str):
     print(f"[{timestamp()}] [ERROR] {msg}", file=sys.stderr, flush=True)
 
 
+def create_archive(source_dir: Path, archive_path: Path) -> None:
+    """Создаёт tar.gz архив из директории."""
+    log_info(f"Создание архива {archive_path.name} из {source_dir.name}...")
+    
+    with tarfile.open(archive_path, "w:gz") as tar:
+        # Добавляем директорию в архив с сохранением структуры
+        tar.add(source_dir, arcname=source_dir.name)
+    
+    log_info(f"✓ Архив создан: {archive_path} ({archive_path.stat().st_size} байт)")
+
+
 @dataclass
 class AppStatus:
     """Состояние Spark-приложения."""
@@ -96,12 +108,13 @@ class AppStatus:
 class SparkSubmitThread(threading.Thread):
     """Поток для запуска spark-submit и мониторинга статуса приложения."""
     
-    def __init__(self, app_name: str, log_host: str, log_port: int, app_url: str):
+    def __init__(self, app_name: str, log_host: str, log_port: int, app_url: str, archive_url: Optional[str] = None):
         super().__init__(daemon=True)
         self.app_name = app_name
         self.log_host = log_host
         self.log_port = log_port
         self.app_url = app_url
+        self.archive_url = archive_url
         
         self.status = AppStatus()
         self.status_lock = threading.Lock()
@@ -160,10 +173,16 @@ class SparkSubmitThread(threading.Thread):
             "--conf", "spark.kubernetes.submission.waitAppCompletion=true",
             "--conf", "spark.kubernetes.driver.limit.cores=1",
             "--conf", "spark.kubernetes.executor.limit.cores=1",
-            
-            # URL файла из MinIO
-            self.app_url,
         ]
+        
+        # Добавляем архив с дополнительными пакетами, если указан
+        if self.archive_url:
+            # Формат: URL#директория_распаковки
+            # Spark распакует архив в рабочую директорию и создаст симлинк с указанным именем
+            cmd.extend(["--archives", f"{self.archive_url}#extra_libs"])
+        
+        # URL файла из MinIO
+        cmd.append(self.app_url)
         
         log_info(f"Запуск spark-submit: {self.app_name}")
         
@@ -372,16 +391,25 @@ def main():
     log_host = get_host_ip()
     app_name = f"cluster-mode-demo-{int(time.time())}"
     app_file = BASEDIR / "app.py"
-    object_name = f"app-{int(time.time())}.py"
+    timestamp_str = str(int(time.time()))
+    object_name = f"app-{timestamp_str}.py"
+    
+    # Пути для архива с дополнительными пакетами
+    extra_package_dir = BASEDIR / "extra_package"
+    archive_name = f"extra_package-{timestamp_str}.tar.gz"
+    archive_path = BASEDIR / archive_name
+    archive_object_name = archive_name
     
     print("=" * 60)
     print("=== Запуск Spark-приложения в cluster-режиме ===")
-    print("=== (через MinIO S3-хранилище) ===")
+    print("=== (через MinIO S3-хранилище с архивами) ===")
     print("=" * 60)
     log_info(f"Application Name: {app_name}")
     log_info(f"Log Host: {log_host}:{LOG_PORT}")
     log_info(f"App File: {app_file}")
     log_info(f"MinIO Object: {MINIO_BUCKET}/{object_name}")
+    log_info(f"Extra Package: {extra_package_dir}")
+    log_info(f"Archive: {archive_name}")
     print()
     
     # Удаляем старый под драйвера
@@ -389,6 +417,22 @@ def main():
         ["kubectl", "delete", "pod", "spark-driver-cluster-demo", "-n", NAMESPACE, "--ignore-not-found=true"],
         capture_output=True
     )
+    
+    # Создаём архив с дополнительными пакетами
+    archive_url = None
+    try:
+        if extra_package_dir.exists():
+            create_archive(extra_package_dir, archive_path)
+            
+            # Загружаем архив в MinIO
+            archive_url = upload_to_minio(archive_path, archive_object_name)
+            log_info(f"URL архива: {archive_url}")
+            print()
+        else:
+            log_info(f"Директория {extra_package_dir} не найдена, пропускаем создание архива")
+    except Exception as e:
+        log_error(f"Не удалось создать/загрузить архив: {e}")
+        return 1
     
     # Загружаем app.py в MinIO
     try:
@@ -417,7 +461,8 @@ def main():
             app_name=app_name,
             log_host=log_host,
             log_port=LOG_PORT,
-            app_url=app_url
+            app_url=app_url,
+            archive_url=archive_url
         )
         spark_thread.start()
         
@@ -481,8 +526,15 @@ def main():
             return 1
     
     finally:
-        # Всегда удаляем файл из MinIO
+        # Всегда удаляем файлы из MinIO
         delete_from_minio(object_name)
+        if archive_url:
+            delete_from_minio(archive_object_name)
+        
+        # Удаляем локальный архив
+        if archive_path.exists():
+            archive_path.unlink()
+            log_info(f"✓ Локальный архив удалён: {archive_path}")
 
 
 if __name__ == "__main__":

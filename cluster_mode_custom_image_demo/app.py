@@ -112,6 +112,35 @@ def run_spark_job():
     print(f"Python version: {sys.version}")
     print(f"Python executable: {sys.executable}")
     
+    # Проверяем наличие архива с дополнительными пакетами
+    extra_libs_path = os.path.join(os.getcwd(), "extra_libs")
+    if os.path.exists(extra_libs_path):
+        print(f"\n✓ Найден архив extra_libs: {extra_libs_path}")
+        print(f"  Содержимое: {os.listdir(extra_libs_path)}")
+        
+        # Добавляем путь к extra_package в sys.path
+        sys.path.insert(0, extra_libs_path)
+        
+        # Импортируем и тестируем extra_module
+        try:
+            from extra_package import extra_module
+            result = extra_module.extra_function()
+            print(f"  ✓ extra_function() вызвана успешно!")
+            print(f"  ✓ Результат: {result}")
+            
+            # Проверяем корректность результата
+            expected = "extra_function called!"
+            if result == expected:
+                print(f"  ✓ Результат корректен: '{result}' == '{expected}'")
+            else:
+                print(f"  ✗ ОШИБКА: ожидалось '{expected}', получено '{result}'")
+                raise ValueError(f"Некорректный результат от extra_function: {result}")
+        except Exception as e:
+            print(f"  ✗ Ошибка при импорте/вызове extra_module: {e}")
+            raise
+    else:
+        print(f"\n⚠ Архив extra_libs не найден в {os.getcwd()}")
+    
     print("\n" + "=" * 80)
     print("CREATING SPARK SESSION")
     print("=" * 80)
