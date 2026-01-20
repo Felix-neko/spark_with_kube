@@ -1,0 +1,26 @@
+---
+# NodePort сервис для доступа к MinIO API извне кластера
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-nodeport
+  namespace: spark
+  labels:
+    app: minio
+spec:
+  type: NodePort
+  ports:
+    # MinIO API (S3-совместимый API)
+    - name: api
+      port: 9000
+      targetPort: 9000
+      nodePort: 30900  # Доступ извне по порту 30900
+      protocol: TCP
+    # MinIO Console (веб-интерфейс)
+    - name: console
+      port: 9001
+      targetPort: 9001
+      nodePort: 30901  # Доступ извне по порту 30901
+      protocol: TCP
+  selector:
+    app: minio
