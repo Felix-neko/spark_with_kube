@@ -94,10 +94,16 @@ def get_executor_python_info(iterator):
     """Получает информацию о Python на executor-нодах."""
     import sys
     import os
+    import platform
     executor_info = {
         'python_version': sys.version,
         'python_executable': sys.executable,
-        'hostname': os.environ.get('HOSTNAME', 'UNKNOWN')
+        'python_prefix': sys.prefix,
+        'python_exec_prefix': sys.exec_prefix,
+        'hostname': os.environ.get('HOSTNAME', 'UNKNOWN'),
+        'cwd': os.getcwd(),
+        'platform': platform.platform(),
+        'python_implementation': platform.python_implementation()
     }
     yield executor_info
 
@@ -108,9 +114,55 @@ def run_spark_job():
     print("CLUSTER MODE DEMO STARTED")
     print("=" * 80)
     
+    print("\n" + "=" * 80)
+    print("ИНФОРМАЦИЯ О PYTHON НА ДРАЙВЕРЕ")
+    print("=" * 80)
     print(f"Current working dir: {os.getcwd()}")
     print(f"Python version: {sys.version}")
     print(f"Python executable: {sys.executable}")
+    print(f"Python prefix: {sys.prefix}")
+    print(f"Python exec_prefix: {sys.exec_prefix}")
+    
+    import platform
+    print(f"Platform: {platform.platform()}")
+    print(f"Python implementation: {platform.python_implementation()}")
+    
+    # Проверяем наличие virtualenv
+    print("\n--- Проверка наличия virtualenv ---")
+    pyspark_venv_path = os.path.join(os.getcwd(), "pyspark_venv")
+    if os.path.exists(pyspark_venv_path):
+        print(f"✓ Найден pyspark_venv: {pyspark_venv_path}")
+        print(f"  Содержимое: {os.listdir(pyspark_venv_path)}")
+        
+        # Проверяем структуру внутри
+        for item in os.listdir(pyspark_venv_path):
+            item_path = os.path.join(pyspark_venv_path, item)
+            if os.path.isdir(item_path):
+                print(f"  Директория {item}: {os.listdir(item_path)[:10]}")  # Первые 10 элементов
+        
+        # Тестируем Python из virtualenv
+        venv_python = os.path.join(pyspark_venv_path, "conda_venv_temp", "bin", "python")
+        if os.path.exists(venv_python):
+            print(f"\n✓ Найден Python из virtualenv: {venv_python}")
+            
+            # Запускаем Python из virtualenv и получаем информацию
+            import subprocess
+            result = subprocess.run(
+                [venv_python, "-c", "import sys; print(f'Python: {sys.executable}'); print(f'Version: {sys.version}'); import pyspark; print(f'PySpark: {pyspark.__version__}')"],
+                capture_output=True,
+                text=True
+            )
+            print("  Вывод Python из virtualenv:")
+            for line in result.stdout.strip().split('\n'):
+                print(f"    {line}")
+            if result.stderr:
+                print(f"  Ошибки: {result.stderr}")
+        else:
+            print(f"✗ Python не найден в virtualenv: {venv_python}")
+    else:
+        print(f"✗ pyspark_venv не найден в {os.getcwd()}")
+    
+    print("=" * 80)
     
     # Проверяем наличие архива с дополнительными пакетами
     extra_libs_path = os.path.join(os.getcwd(), "extra_libs")
@@ -162,9 +214,14 @@ def run_spark_job():
     
     for i, info in enumerate(executor_info):
         print(f"\n[EXECUTOR {i+1}]")
+        print(f"  Hostname: {info['hostname']}")
+        print(f"  Current working dir: {info['cwd']}")
         print(f"  Python version: {info['python_version']}")
         print(f"  Python executable: {info['python_executable']}")
-        print(f"  Hostname: {info['hostname']}")
+        print(f"  Python prefix: {info['python_prefix']}")
+        print(f"  Python exec_prefix: {info['python_exec_prefix']}")
+        print(f"  Platform: {info['platform']}")
+        print(f"  Python implementation: {info['python_implementation']}")
     
     print("\n" + "=" * 80)
     print("ПРОВЕРКА 2: Базовые операции с DataFrame")

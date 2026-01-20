@@ -26,6 +26,11 @@ BASEDIR = Path(__file__).parent.resolve()
 PROJECT_ROOT = BASEDIR.parent
 VENV_PATH = PROJECT_ROOT / ".venv"
 
+# Путь к miniconda
+MINICONDA_PATH = Path("/home/felix/software/miniconda3")
+CONDA_BIN = MINICONDA_PATH / "bin" / "conda"
+CONDA_PACK_BIN = MINICONDA_PATH / "bin" / "conda-pack"
+
 K8S_MASTER = "k8s://https://192.168.85.2:8443"
 EXECUTOR_IMAGE = "felixneko/spark:spark-3.5.8-python-3.8"
 NAMESPACE = "spark"
@@ -84,6 +89,69 @@ def log_error(msg: str):
     print(f"[{timestamp()}] [ERROR] {msg}", file=sys.stderr, flush=True)
 
 
+def get_pyspark_version() -> str:
+    """Получает версию PySpark из текущего окружения."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", "import pyspark; print(pyspark.__version__)"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        version = result.stdout.strip()
+        log_info(f"Версия PySpark в текущем окружении: {version}")
+        return version
+    except Exception as e:
+        log_error(f"Не удалось определить версию PySpark: {e}")
+        return "3.5.8"  # Fallback
+
+
+def create_conda_venv(env_name: str, pyspark_version: str) -> None:
+    """Создаёт conda-окружение с PySpark указанной версии."""
+    # Удаляем существующее окружение
+    log_info(f"Удаление существующего conda-окружения '{env_name}' (если есть)...")
+    subprocess.run(
+        [str(CONDA_BIN), "env", "remove", "-n", env_name, "-y"],
+        capture_output=True  # Игнорируем ошибку, если окружение не существует
+    )
+    
+    # Создаём новое conda-окружение с Python 3.8 (совместимо с образом)
+    log_info(f"Создание conda-окружения '{env_name}' с Python 3.8...")
+    subprocess.run(
+        [str(CONDA_BIN), "create", "-n", env_name, "python=3.8", "-y"],
+        check=True
+    )
+    
+    # Устанавливаем PySpark через pip внутри conda-окружения
+    conda_env_path = MINICONDA_PATH / "envs" / env_name
+    env_pip = conda_env_path / "bin" / "pip"
+    
+    log_info(f"Установка pyspark=={pyspark_version} в conda-окружение...")
+    subprocess.run(
+        [str(env_pip), "install", "--index-url", "https://pypi.org/simple", f"pyspark=={pyspark_version}"],
+        check=True
+    )
+    
+    log_info(f"✓ Conda-окружение '{env_name}' создано")
+
+
+def pack_conda_venv(env_name: str, archive_path: Path) -> None:
+    """Упаковывает conda-окружение с помощью conda-pack для портабельности."""
+    log_info(f"Упаковка conda-окружения '{env_name}' с помощью conda-pack...")
+    
+    # Используем полный путь к окружению вместо имени (надёжнее)
+    conda_env_path = MINICONDA_PATH / "envs" / env_name
+    
+    # Используем conda-pack для создания портабельного архива
+    # conda-pack заменяет абсолютные пути на относительные и разрешает симлинки
+    subprocess.run(
+        [str(CONDA_PACK_BIN), "-p", str(conda_env_path), "-o", str(archive_path), "--force"],
+        check=True
+    )
+    
+    log_info(f"✓ Портабельный архив создан: {archive_path} ({archive_path.stat().st_size} байт)")
+
+
 def create_archive(source_dir: Path, archive_path: Path) -> None:
     """Создаёт tar.gz архив из директории."""
     log_info(f"Создание архива {archive_path.name} из {source_dir.name}...")
@@ -108,13 +176,15 @@ class AppStatus:
 class SparkSubmitThread(threading.Thread):
     """Поток для запуска spark-submit и мониторинга статуса приложения."""
     
-    def __init__(self, app_name: str, log_host: str, log_port: int, app_url: str, archive_url: Optional[str] = None):
+    def __init__(self, app_name: str, log_host: str, log_port: int, app_url: str, 
+                 archive_url: Optional[str] = None, venv_url: Optional[str] = None):
         super().__init__(daemon=True)
         self.app_name = app_name
         self.log_host = log_host
         self.log_port = log_port
         self.app_url = app_url
         self.archive_url = archive_url
+        self.venv_url = venv_url
         
         self.status = AppStatus()
         self.status_lock = threading.Lock()
@@ -158,11 +228,6 @@ class SparkSubmitThread(threading.Thread):
             
             "--conf", f"spark.kubernetes.driverEnv.LOG_HOST={self.log_host}",
             "--conf", f"spark.kubernetes.driverEnv.LOG_PORT={self.log_port}",
-            "--conf", "spark.kubernetes.driverEnv.PYSPARK_PYTHON=python3.8",
-            "--conf", "spark.kubernetes.driverEnv.PYSPARK_DRIVER_PYTHON=python3.8",
-            "--conf", "spark.executorEnv.PYSPARK_PYTHON=python3.8",
-            "--conf", "spark.pyspark.python=python3.8",
-            "--conf", "spark.pyspark.driver.python=python3.8",
             "--conf", "spark.executor.instances=2",
             "--conf", "spark.executor.memory=1g",
             "--conf", "spark.executor.cores=1",
@@ -175,11 +240,40 @@ class SparkSubmitThread(threading.Thread):
             "--conf", "spark.kubernetes.executor.limit.cores=1",
         ]
         
-        # Добавляем архив с дополнительными пакетами, если указан
+        # Добавляем архивы
+        archives = []
+        
+        # Архив с virtualenv (если указан)
+        if self.venv_url:
+            archives.append(f"{self.venv_url}#pyspark_venv")
+            # Настраиваем использование Python из conda-окружения
+            # conda-pack создаёт архив со структурой: bin/python, lib/, и т.д.
+            # После распаковки через #pyspark_venv структура будет: ./pyspark_venv/bin/python
+            venv_python_rel = "./pyspark_venv/bin/python"
+            cmd.extend([
+                "--conf", f"spark.pyspark.python={venv_python_rel}",
+                "--conf", f"spark.pyspark.driver.python={venv_python_rel}",
+                # Переменные окружения для Kubernetes - тоже относительный путь
+                "--conf", f"spark.kubernetes.driverEnv.PYSPARK_PYTHON={venv_python_rel}",
+                "--conf", f"spark.kubernetes.driverEnv.PYSPARK_DRIVER_PYTHON={venv_python_rel}",
+                "--conf", f"spark.executorEnv.PYSPARK_PYTHON={venv_python_rel}",
+            ])
+        else:
+            # Если virtualenv не указан - используем системный Python
+            cmd.extend([
+                "--conf", "spark.kubernetes.driverEnv.PYSPARK_PYTHON=python3.8",
+                "--conf", "spark.kubernetes.driverEnv.PYSPARK_DRIVER_PYTHON=python3.8",
+                "--conf", "spark.executorEnv.PYSPARK_PYTHON=python3.8",
+                "--conf", "spark.pyspark.python=python3.8",
+                "--conf", "spark.pyspark.driver.python=python3.8",
+            ])
+        
+        # Архив с дополнительными пакетами (если указан)
         if self.archive_url:
-            # Формат: URL#директория_распаковки
-            # Spark распакует архив в рабочую директорию и создаст симлинк с указанным именем
-            cmd.extend(["--archives", f"{self.archive_url}#extra_libs"])
+            archives.append(f"{self.archive_url}#extra_libs")
+        
+        if archives:
+            cmd.extend(["--archives", ",".join(archives)])
         
         # URL файла из MinIO
         cmd.append(self.app_url)
@@ -400,6 +494,12 @@ def main():
     archive_path = BASEDIR / archive_name
     archive_object_name = archive_name
     
+    # Пути для портабельного conda-окружения
+    conda_env_name = "spark_portable_env"  # Имя временного conda-окружения
+    venv_archive_name = f"pyspark_venv-{timestamp_str}.tar.gz"
+    venv_archive_path = BASEDIR / venv_archive_name
+    venv_object_name = venv_archive_name
+    
     print("=" * 60)
     print("=== Запуск Spark-приложения в cluster-режиме ===")
     print("=== (через MinIO S3-хранилище с архивами) ===")
@@ -410,6 +510,7 @@ def main():
     log_info(f"MinIO Object: {MINIO_BUCKET}/{object_name}")
     log_info(f"Extra Package: {extra_package_dir}")
     log_info(f"Archive: {archive_name}")
+    log_info(f"VirtualEnv Archive: {venv_archive_name}")
     print()
     
     # Удаляем старый под драйвера
@@ -417,6 +518,22 @@ def main():
         ["kubectl", "delete", "pod", "spark-driver-cluster-demo", "-n", NAMESPACE, "--ignore-not-found=true"],
         capture_output=True
     )
+    
+    # Создаём портабельное conda-окружение с PySpark
+    venv_url = None
+    try:
+        log_info("Создание портабельного conda-окружения с PySpark...")
+        pyspark_version = get_pyspark_version()
+        create_conda_venv(conda_env_name, pyspark_version)
+        pack_conda_venv(conda_env_name, venv_archive_path)
+        
+        # Загружаем архив virtualenv в MinIO
+        venv_url = upload_to_minio(venv_archive_path, venv_object_name)
+        log_info(f"URL virtualenv: {venv_url}")
+        print()
+    except Exception as e:
+        log_error(f"Не удалось создать/загрузить virtualenv: {e}")
+        return 1
     
     # Создаём архив с дополнительными пакетами
     archive_url = None
@@ -462,7 +579,8 @@ def main():
             log_host=log_host,
             log_port=LOG_PORT,
             app_url=app_url,
-            archive_url=archive_url
+            archive_url=archive_url,
+            venv_url=venv_url
         )
         spark_thread.start()
         
@@ -530,11 +648,24 @@ def main():
         delete_from_minio(object_name)
         if archive_url:
             delete_from_minio(archive_object_name)
+        if venv_url:
+            delete_from_minio(venv_object_name)
         
-        # Удаляем локальный архив
+        # Удаляем локальные архивы и временный virtualenv
         if archive_path.exists():
             archive_path.unlink()
             log_info(f"✓ Локальный архив удалён: {archive_path}")
+        
+        if venv_archive_path.exists():
+            venv_archive_path.unlink()
+            log_info(f"✓ Архив virtualenv удалён: {venv_archive_path}")
+        
+        # Удаляем временное conda-окружение
+        subprocess.run(
+            [str(CONDA_BIN), "env", "remove", "-n", conda_env_name, "-y"],
+            capture_output=True  # Игнорируем ошибки
+        )
+        log_info(f"✓ Conda-окружение '{conda_env_name}' удалено")
 
 
 if __name__ == "__main__":
