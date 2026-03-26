@@ -394,4 +394,5 @@ if __name__ == "__main__":
         memory_target_utilization=int(target_memory_utilization_gib * 1024**3),
     )
 
-    run_with_monitoring(master_settings, test_settings)
+    process_stress_test(master_settings, test_settings)
+    # run_with_monitoring(master_settings, test_settings)
